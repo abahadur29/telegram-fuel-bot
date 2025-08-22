@@ -1,0 +1,9 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local state file (don’t track ride history in GitHub)
+state.json
+
+# Secrets
+.env
