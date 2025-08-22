@@ -1,10 +1,14 @@
 from __future__ import annotations
 import os
-import json
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
+from threading import Thread
+
+# Import Flask for the keep-alive web server
+from flask import Flask
 
 from telegram import Update
 from telegram.ext import (
@@ -16,6 +20,21 @@ from telegram.ext import (
     filters,
     PicklePersistence,
 )
+
+# --------------------------- Web Server Keep-Alive ---------------------------
+# Create a Flask web server instance
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    """A simple route to respond to Render's health checks."""
+    return "Bot is alive!"
+
+def run_web_server():
+    """Runs the Flask app in a separate thread."""
+    # Render provides the PORT environment variable.
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
 
 # --------------------------- Config & State ---------------------------
 # The bot's state will now be persisted by the PicklePersistence layer
@@ -29,6 +48,13 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 if not TOKEN:
     raise SystemExit("Missing TELEGRAM_TOKEN in environment (.env)")
+
+# Set up basic logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class State:
@@ -354,8 +380,14 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reset all bot data."""
-    state = State()  # create a new default state
-    context.bot_data['state'] = state
+    # A simple check to prevent accidental reset by non-registered users.
+    # You might want to add a more robust admin check here.
+    uid = user_id(update)
+    if uid not in get_state(context).users:
+        await update.message.reply_text("Only registered users can reset the state.")
+        return
+        
+    context.bot_data['state'] = State()  # create a new default state
     await update.message.reply_text("Bot state has been reset. All data cleared!")
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -369,10 +401,10 @@ async def post_init(application: Application):
     # If the bot is started for the first time, 'state' won't be in bot_data.
     # We initialize it with a new State object.
     if 'state' not in application.bot_data:
-        print("Initializing new state...")
+        logger.info("Initializing new state...")
         application.bot_data['state'] = State()
     else:
-        print("Loaded existing state from persistence file.")
+        logger.info("Loaded existing state from persistence file.")
         # This part ensures that if we add new fields to the State dataclass,
         # old persistence files are gracefully updated.
         loaded_state = application.bot_data['state']
@@ -385,7 +417,12 @@ async def post_init(application: Application):
 
 
 def main():
-    """Sets up the bot and starts polling."""
+    """Sets up the bot, the web server, and starts everything."""
+    # Start the Flask web server in a daemon thread
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+    
     # We use PicklePersistence to save the bot's state.
     persistence = PicklePersistence(filepath=STATE_FILE)
 
@@ -413,7 +450,7 @@ def main():
     # Add a handler for any command that wasn't recognized
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("Bot is running… Press Ctrl+C to stop.")
+    logger.info("Bot is running… Press Ctrl+C to stop.")
     app.run_polling()
 
 if __name__ == "__main__":
